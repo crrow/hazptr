@@ -1,6 +1,7 @@
 use std::{
+    collections::HashSet,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, AtomicPtr, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
 };
 
 // At present, the domain is static which managed by us,
@@ -10,8 +11,15 @@ use std::{
 // also be dropped.
 // TODO: fix the domain.
 static SHARED_DOMAIN: HazPtrDomain = HazPtrDomain {
-    hazptrs: HazPtrs {},
-    retired: RetiredList {},
+    hazptrs: HazPtrs {
+        // cannot be default, since default is not const.
+        // but the new method is const.
+        head: AtomicPtr::new(std::ptr::null_mut()),
+    },
+    retired: RetiredList {
+        head: AtomicPtr::new(std::ptr::null_mut()),
+        count: AtomicUsize::new(0),
+    },
 };
 
 /// HazPtrHolder is used for readers.
@@ -103,7 +111,37 @@ impl HazPtr {
     }
 }
 
-pub trait Deleter {}
+pub trait Deleter {
+    fn delete(&self, ptr: *mut dyn Drop);
+}
+
+impl Deleter for fn(*mut dyn Drop) {
+    fn delete(&self, ptr: *mut dyn Drop) {
+        (*self)(ptr)
+    }
+}
+
+pub mod deleters {
+    use crate::Deleter;
+    /// # Safety
+    ///
+    /// Can only be used on values that were originally derived from a Box.
+    fn _drop_box(ptr: *mut dyn Drop) {
+        // Safety: Safe by the safety gurantees of retire and because its only used when retiring box objects.
+        let _ = unsafe { Box::from_raw(ptr) };
+    }
+    pub static drop_box: fn(*mut dyn Drop) = _drop_box;
+
+    fn _drop_in_place(ptr: *mut dyn Drop) {
+        unsafe {
+            std::ptr::drop_in_place(ptr);
+        }
+    }
+    /// # Safety
+    /// Always safe to use given requirements on HazPtrObj::retire,
+    /// but may lead to memory leaks if the pointer type itself needs drop.
+    pub static drop_in_place: fn(*mut dyn Drop) = _drop_in_place;
+}
 
 #[allow(dyn_drop, drop_bounds)]
 pub trait HazPtrObject
@@ -117,8 +155,9 @@ where
     ///
     ///  Caller must guarantee that pointer is still valid.
     ///  Caller must guarantee that Self is no longer accessible to readers.
+    ///  Caller must guarantee that deleter is valid deleter for Self.
     ///  Its okay for existing readers to still refer to Self.
-    unsafe fn retire<D: Deleter>(me: *mut Self) {
+    unsafe fn retire(me: *mut Self, d: &'static dyn Deleter) {
         if !std::mem::needs_drop::<Self>() {
             return;
         }
@@ -135,7 +174,7 @@ where
         // The reason we need the dyn cast here is that hazard pointer can
         // guard many different types, it doesn't care the underlying type,
         // but the domain is not a generic type.
-        let _ = x.retire::<D>(me as *mut dyn Drop);
+        let _ = x.retire(me as *mut dyn Drop, d);
     }
 }
 
@@ -264,13 +303,145 @@ impl HazPtrDomain {
     // we will stick on the particular type, and have multiple domain type
     // for each type is not that good.
     //
-    // retire needs to pass the deleter into the domain
-    fn retire<D: Deleter>(&self, ptr: *mut dyn Drop) {
-        // When compare ptr, only compare data, not vtable.
-        todo!()
+    // retire needs to pass the deleter into the domain.
+    fn retire(&self, ptr: *mut dyn Drop, d: &'static dyn Deleter) {
+        // First stick ptr onto the list of retired.
+        let new_retired = Box::into_raw(Box::new(Retired {
+            data_ptr: ptr,
+            deleter: d,
+            next: AtomicPtr::new(std::ptr::null_mut()),
+        }));
+        // Increment the count before we give anyone a chance to reclaim it.
+        // we need to update the counter before we actually update the list.
+        // because someone else may decrement the count, including our own
+        // before we add. then the count may be negative.
+        self.retired.count.fetch_add(1, Ordering::SeqCst);
+        let head_ptr = &self.retired.head;
+        let mut head = head_ptr.load(Ordering::SeqCst);
+        loop {
+            *unsafe { &mut *new_retired }.next.get_mut() = head;
+            match head_ptr.compare_exchange_weak(
+                head,
+                new_retired,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(new_old_head) => head = new_old_head,
+            };
+        }
+
+        // Sec, check if we need to retire
+        if self.retired.count.load(Ordering::SeqCst) != 0 {
+            // try to reclaim some objects
+            // TODO:
+            self.bulk_reclaim(0, false);
+        }
+    }
+
+    fn bulk_reclaim(&self, mut reclaimed: usize, block: bool) -> usize {
+        // we need to steal the entire retired linked list.
+        let steal = self
+            .retired
+            .head
+            .swap(std::ptr::null_mut(), Ordering::SeqCst);
+        if steal.is_null() {
+            // nothing to reclaim.
+            return 0;
+        }
+
+        // get all guarded addresses.
+        // walking the hazptr linked list, and collect all address into the hashset collection.
+        let mut guarded_ptrs = HashSet::new();
+        let mut node = self.hazptrs.head.load(Ordering::SeqCst);
+        while !node.is_null() {
+            // Safety: we haven't deallocated any node.
+            let n = unsafe { &*node };
+            guarded_ptrs.insert(n.ptr.load(Ordering::SeqCst));
+            node = n.next.load(Ordering::SeqCst);
+        }
+
+        // reclaim any retired objects that aren't guarded.
+        let mut stealed_retired_node_ptr = steal;
+        let mut remaining = std::ptr::null_mut();
+        let mut retired_list_tail = None;
+
+        while !stealed_retired_node_ptr.is_null() {
+            // Safety: we own these objects since we steal the linkedlist's head at the begining.
+            // so no one can access the linedlist.
+            let mut stealed_retired_node = unsafe { Box::from_raw(stealed_retired_node_ptr) };
+            stealed_retired_node_ptr = *stealed_retired_node.next.get_mut(); // update the current ptr
+
+            // compare the data address.
+            if guarded_ptrs.contains(&(stealed_retired_node.data_ptr as *mut u8)) {
+                // if the address is still guareded, then its not safe to reclaim.
+                // we need to reconstruct the list
+
+                // make current node point to the remaining.
+                *stealed_retired_node.next.get_mut() = remaining;
+                // make current node as the head of remaining.
+                remaining = Box::into_raw(stealed_retired_node);
+                if retired_list_tail.is_none() {
+                    retired_list_tail = Some(remaining);
+                }
+            } else {
+                // no longer guarded, use deleter to reclaim.
+                stealed_retired_node
+                    .deleter
+                    .delete(stealed_retired_node.data_ptr);
+                reclaimed += 1;
+            }
+        }
+
+        // update the retired list count.
+        self.retired.count.fetch_sub(reclaimed, Ordering::SeqCst);
+
+        // we have to reconstruct the retire linkedlist
+
+        let tail = if let Some(tail) = retired_list_tail {
+            assert!(!remaining.is_null());
+            tail
+        } else {
+            // nothing remain, return.
+            assert!(remaining.is_null());
+            return reclaimed;
+        };
+
+        // try to write the remaining linkedlist back to the retired linkedlist.
+        let original_retired_list = &self.retired.head;
+        let mut head = original_retired_list.load(Ordering::SeqCst);
+        loop {
+            *unsafe { &mut *tail }.next.get_mut() = head;
+            match original_retired_list.compare_exchange_weak(
+                head,
+                remaining,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(head_now) => head = head_now,
+            }
+        }
+
+        if !remaining.is_null() && block {
+            // caller wants to reclaim everything, but have something remaining.
+            std::thread::yield_now();
+            return self.bulk_reclaim(reclaimed, true);
+        }
+        reclaimed
+    }
+
+    pub fn eager_reclaim(&self, block: bool) -> usize {
+        self.bulk_reclaim(0, block)
     }
 }
 
+impl Drop for HazPtrDomain {
+    fn drop(&mut self) {
+        // at present, the memory of domain is leaked.
+        todo!()
+    }
+}
 /// In realistic we may have a basic linkedlist type for the following two
 /// Linkedlist, and also, they two are also have some slight difference for
 /// optimization, so its fine for us just inline implementing they now.
@@ -283,22 +454,43 @@ struct HazPtrs {
 // The retired linkedlist, once we retire some ptr, then it should go here.
 struct RetiredList {
     head: AtomicPtr<Retired>,
+    // how many elements in the retired list?
+    count: AtomicUsize,
 }
 
+// Each of the thing in the retired list, should certainly have the pointer,
+// the vtable entry for the drop implementation of the target type.
 struct Retired {
     // the actual pointer to the data, the thing we are going to compare with hazptrs'.
     data_ptr: *mut dyn Drop,
-    reclaim: &'static dyn Fn(*mut dyn Drop),
+    // recalim should be a function pointer.
+    deleter: &'static dyn Deleter,
+    next: AtomicPtr<Retired>,
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+    use std::sync::Arc;
+
+    struct CountDrops(Arc<AtomicUsize>);
+    impl Drop for CountDrops {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl CountDrops {
+        fn new(x: usize) -> Self {
+            CountDrops(Arc::new(AtomicUsize::new(x)))
+        }
+    }
 
     #[test]
     fn tfn() {
+        let drops = Arc::new(AtomicUsize::new(0));
         let x = AtomicPtr::new(Box::into_raw(Box::new(
-            HazPtrObjectWrapper::with_default_domain(1),
+            HazPtrObjectWrapper::with_default_domain((1, CountDrops(drops.clone()))),
         )));
 
         // as a reader
@@ -308,24 +500,65 @@ mod tests {
         //    2. Writer to AtomicPtr use HazPtrObject::retire.
         let my_x = unsafe { h.load(&x).expect("not null") };
         // valid:
-        let _: i32 = **my_x;
+        assert_eq!(my_x.0, 1i32);
         h.reset();
         // invalid:
-        // let _: i32 = **my_x;
+        // let _: i32 = my_x.0;
         // reload
         let my_x = unsafe { h.load(&x).expect("not null") };
         // valid:
-        let _: i32 = **my_x;
+        assert_eq!(my_x.0, 1i32);
         drop(h);
         // then invalid again
-        // let _: i32 = **my_x;
+        // let _: i32 = my_x.0;
 
-        // as a writer
-        let mut old = x.swap(
-            Box::into_raw(Box::new(HazPtrObjectWrapper::with_default_domain(2))),
+        // make a holder before writer
+        let mut h = HazPtrHolder::default();
+        let my_x = unsafe { h.load(&x).expect("not null") };
+        assert_eq!(1i32, my_x.0);
+
+        // make a holder before writer
+        let mut h_tmp = HazPtrHolder::default();
+        let _ = unsafe { h_tmp.load(&x).expect("not null") };
+        drop(h_tmp);
+
+        // as a writer try to retire
+        let drops_2 = Arc::new(AtomicUsize::new(0));
+        let old = x.swap(
+            Box::into_raw(Box::new(HazPtrObjectWrapper::with_default_domain((
+                2,
+                CountDrops(drops_2.clone()),
+            )))),
             Ordering::Acquire,
         );
+
+        // build a holder after the writer
+        let mut h2 = HazPtrHolder::default();
+        let my_x2 = unsafe { h2.load(&x).expect("not null") };
+        assert_eq!(my_x2.0, 2);
+
         // safety: old value is not acessible.
-        unsafe { HazPtrObject::retire(old) };
+        unsafe { HazPtrObject::retire(old, &deleters::drop_box) };
+        // the origin perior reader can still read
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(1, my_x.0);
+
+        // still exists holder, so eager reclaim doesn't work
+        assert_eq!(SHARED_DOMAIN.eager_reclaim(false), 0);
+
+        assert_eq!(1, my_x.0);
+
+        drop(h);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        assert_eq!(SHARED_DOMAIN.eager_reclaim(false), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(drops_2.load(Ordering::SeqCst), 0); // why ? since we doesn't retire the h2
+
+        // check actually reclaimed
+
+        drop(h2);
+        assert_eq!(SHARED_DOMAIN.eager_reclaim(false), 0);
+        assert_eq!(drops_2.load(Ordering::SeqCst), 0);
     }
 }
