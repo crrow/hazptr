@@ -10,18 +10,10 @@ use crate::{Deleter, HazPtr, Reclaim};
 // Things changed once we have different domain, since
 // once the domain is dropped, then all the hazptrs should
 // also be dropped.
+//
+//
 // TODO: fix the domain.
-pub(crate) static SHARED_DOMAIN: HazPtrDomain = HazPtrDomain {
-    hazptrs: HazPtrs {
-        // cannot be default, since default is not const.
-        // but the new method is const.
-        head: AtomicPtr::new(std::ptr::null_mut()),
-    },
-    retired: RetiredList {
-        head: AtomicPtr::new(std::ptr::null_mut()),
-        count: AtomicUsize::new(0),
-    },
-};
+static SHARED_DOMAIN: HazPtrDomain = HazPtrDomain::new();
 
 // Holds linked list of HazPtrs.
 //
@@ -32,6 +24,26 @@ pub struct HazPtrDomain {
 }
 
 impl HazPtrDomain {
+    pub fn shared() -> &'static Self {
+        &SHARED_DOMAIN
+    }
+    // But we also want user be albe to create their own domains.
+    //
+    // Most users don't need to specify custom domains and custom
+    // deleters, and default use the default domain and default delters.
+    // This is because when we do reclaim we don't actually reallocate the memory,
+    // until the reclaim function is called again in the future.
+    // So if one user uses its own domain and has a bunch of remove operations,
+    // and then don't do any removes, then the memory will never be deallocated.
+    // In the shared domain case, we will try to remove all removable data,
+    // no matter what data structure that the user is using.
+    // So in general, we should use the shared domain.
+    pub const fn new() -> Self {
+        Self {
+            hazptrs: HazPtrs::new(),
+            retired: RetiredList::new(),
+        }
+    }
     // try to acquire a hazard pointer from the domain.
     //
     // We need to walk through the linkedlist, and try to
@@ -258,12 +270,28 @@ impl HazPtrDomain {
 struct HazPtrs {
     head: AtomicPtr<HazPtr>,
 }
+impl HazPtrs {
+    const fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(std::ptr::null_mut()),
+        }
+    }
+}
 
 // The retired linkedlist, once we retire some ptr, then it should go here.
 struct RetiredList {
     head: AtomicPtr<Retired>,
     // how many elements in the retired list?
     count: AtomicUsize,
+}
+
+impl RetiredList {
+    const fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(std::ptr::null_mut()),
+            count: AtomicUsize::new(0),
+        }
+    }
 }
 
 // Each of the thing in the retired list, should certainly have the pointer,

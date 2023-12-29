@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::domain::SHARED_DOMAIN;
+use crate::domain::HazPtrDomain;
 use crate::HazPtr;
 
 /// HazPtrHolder is used for readers.
@@ -18,7 +18,7 @@ impl HazPtrHolder {
             ptr
         } else {
             // if we don't have ptr yet then we acquire one from the global domain.
-            let ptr = SHARED_DOMAIN.acquire();
+            let ptr = HazPtrDomain::shared().acquire();
             self.0 = Some(ptr);
             ptr
         }

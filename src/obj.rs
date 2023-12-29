@@ -12,7 +12,6 @@
 //!
 use std::ops::{Deref, DerefMut};
 
-use crate::domain::SHARED_DOMAIN;
 use crate::{Deleter, HazPtrDomain, Reclaim};
 
 pub trait HazPtrObject
@@ -71,7 +70,7 @@ impl<T> Drop for HazPtrObjectWrapper<T> {
 
 impl<T: 'static> HazPtrObject for HazPtrObjectWrapper<T> {
     fn domain(&self) -> &HazPtrDomain {
-        &SHARED_DOMAIN
+        crate::domain::HazPtrDomain::shared()
     }
 }
 impl<T> Deref for HazPtrObjectWrapper<T> {

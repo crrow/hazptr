@@ -13,7 +13,7 @@ pub use ptr::HazPtr;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::SHARED_DOMAIN;
+    use domain::HazPtrDomain;
 
     use std::sync::{
         atomic::{AtomicPtr, AtomicUsize, Ordering},
@@ -89,22 +89,24 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         assert_eq!(1, my_x.0);
 
+        let shared_domain = HazPtrDomain::shared();
+
         // still exists holder, so eager reclaim doesn't work
-        assert_eq!(SHARED_DOMAIN.eager_reclaim(false), 0);
+        assert_eq!(shared_domain.eager_reclaim(false), 0);
 
         assert_eq!(1, my_x.0);
 
         drop(h);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
 
-        assert_eq!(SHARED_DOMAIN.eager_reclaim(false), 1);
+        assert_eq!(shared_domain.eager_reclaim(false), 1);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(drops_2.load(Ordering::SeqCst), 0); // why ? since we doesn't retire the h2
 
         // check actually reclaimed
 
         drop(h2);
-        assert_eq!(SHARED_DOMAIN.eager_reclaim(false), 0);
+        assert_eq!(shared_domain.eager_reclaim(false), 0);
         assert_eq!(drops_2.load(Ordering::SeqCst), 0);
     }
 }
