@@ -14,12 +14,12 @@ use std::ops::{Deref, DerefMut};
 
 use crate::{Deleter, HazPtrDomain, Reclaim};
 
-pub trait HazPtrObject
+// the object we guarded by hazptr should live at most as long as the domain.
+pub trait HazPtrObject<'domain>
 where
-    // COPY type cannot be DROP
-    Self: Sized + 'static,
+    Self: Sized + 'domain,
 {
-    fn domain(&self) -> &HazPtrDomain;
+    fn domain(&self) -> &'domain HazPtrDomain;
 
     /// Safety:
     ///
@@ -44,43 +44,48 @@ where
     }
 }
 
-pub struct HazPtrObjectWrapper<T> {
+pub struct HazPtrObjectWrapper<'domain, T> {
     inner: T,
-    // domain: *const HazPtrDomain,
+    domain: &'domain HazPtrDomain,
 }
 
-impl<T> HazPtrObjectWrapper<T> {
+impl<T> HazPtrObjectWrapper<'static, T> {
     pub fn with_default_domain(t: T) -> Self {
         Self {
             inner: t,
-            // domain: &SHARED_DOMAIN,
+            domain: HazPtrDomain::shared(),
         }
     }
 }
-impl<T> From<T> for HazPtrObjectWrapper<T> {
+
+impl<'domain, T> HazPtrObjectWrapper<'domain, T> {
+    pub fn with_domain(d: &'domain HazPtrDomain, t: T) -> Self {
+        Self {
+            inner: t,
+            domain: d,
+        }
+    }
+}
+
+impl<T> From<T> for HazPtrObjectWrapper<'_, T> {
     fn from(value: T) -> Self {
         todo!()
     }
 }
 
-// TODO: get rid of this drop wrapper.
-impl<T> Drop for HazPtrObjectWrapper<T> {
-    fn drop(&mut self) {}
-}
-
-impl<T: 'static> HazPtrObject for HazPtrObjectWrapper<T> {
-    fn domain(&self) -> &HazPtrDomain {
-        crate::domain::HazPtrDomain::shared()
+impl<'domain, T: 'domain> HazPtrObject<'domain> for HazPtrObjectWrapper<'domain, T> {
+    fn domain(&self) -> &'domain HazPtrDomain {
+        self.domain
     }
 }
-impl<T> Deref for HazPtrObjectWrapper<T> {
+impl<T> Deref for HazPtrObjectWrapper<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
-impl<T> DerefMut for HazPtrObjectWrapper<T> {
+impl<T> DerefMut for HazPtrObjectWrapper<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }

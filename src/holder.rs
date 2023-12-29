@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::domain::HazPtrDomain;
-use crate::HazPtr;
+use crate::{HazPtr, HazPtrObject};
 
 /// HazPtrHolder is used for readers.
 ///
@@ -9,17 +9,34 @@ use crate::HazPtr;
 /// And every access is shared access.
 ///
 /// HazPtrHolder should know where the HazPtrDomain come from.
-#[derive(Default)]
-pub struct HazPtrHolder(Option<&'static HazPtr>);
+pub struct HazPtrHolder<'domain> {
+    hazard: Option<&'domain HazPtr>,
+    domain: &'domain HazPtrDomain,
+}
 
-impl HazPtrHolder {
-    fn hazptr(&mut self) -> &'static HazPtr {
-        if let Some(ptr) = self.0 {
+impl Default for HazPtrHolder<'static> {
+    fn default() -> Self {
+        Self {
+            hazard: None,
+            domain: HazPtrDomain::shared(),
+        }
+    }
+}
+
+impl<'domain> HazPtrHolder<'domain> {
+    pub fn for_domain(d: &'domain HazPtrDomain) -> Self {
+        Self {
+            hazard: None,
+            domain: d,
+        }
+    }
+    fn hazptr(&mut self) -> &'domain HazPtr {
+        if let Some(ptr) = self.hazard {
             ptr
         } else {
             // if we don't have ptr yet then we acquire one from the global domain.
-            let ptr = HazPtrDomain::shared().acquire();
-            self.0 = Some(ptr);
+            let ptr = self.domain.acquire();
+            self.hazard = Some(ptr);
             ptr
         }
     }
@@ -28,11 +45,14 @@ impl HazPtrHolder {
     /// Caller must guarantee that the address in AtomicPtr is valid as a reference or null.
     ///     If it was null, then the address will be turned into an option through the [`std::ptr::NonNull::new`].
     /// Caller must also guarantee that the value behinde the AtomicPtr will only be deallocated
-    /// through calls to [`HazPtrObject::retire`].
+    /// through calls to [`HazPtrObject::retire`] on the same [`HazPtrDomain`] as this holder has..
     ///
     /// The return type of &T is fine, since the lifetime is the [`HazPtrHolder`] it self, and the [`HazPtrObject`]
     /// will respect us.
-    pub unsafe fn load<'l, T>(&'l mut self, ptr: &'_ AtomicPtr<T>) -> Option<&'l T> {
+    pub unsafe fn load<T>(&mut self, ptr: &'_ AtomicPtr<T>) -> Option<&'domain T>
+    where
+        T: HazPtrObject<'domain>, // the HazPtrObj's lifetime as long as domain's
+    {
         let hazptr = self.hazptr();
         let mut ptr1 = ptr.load(Ordering::SeqCst);
         loop {
@@ -46,7 +66,14 @@ impl HazPtrHolder {
                     // safety: this is safe:
                     // 1. target of ptr1 will not be deallocated since our hazard pointer is active.
                     // 2. point address is valid by the safty contract of load.
-                    unsafe { nn.as_ref() }
+
+                    let r = unsafe { nn.as_ref() };
+                    debug_assert_eq!(
+                        r.domain() as *const HazPtrDomain,
+                        self.domain as *const HazPtrDomain,
+                        "object guareded by different domain than holder used to access"
+                    );
+                    r
                 });
             } else {
                 ptr1 = ptr2;
@@ -56,18 +83,18 @@ impl HazPtrHolder {
     pub fn reset(&mut self) {
         // we can do this here since the reset require a mutable reference,
         // if there exists loaded value T, then we cannot call this method.
-        if let Some(hp) = self.0 {
+        if let Some(hp) = self.hazard {
             hp.ptr.store(std::ptr::null_mut(), Ordering::SeqCst);
         }
     }
 }
 
-impl Drop for HazPtrHolder {
+impl Drop for HazPtrHolder<'_> {
     fn drop(&mut self) {
         // make sure if is currently guarding something, then stop guarding that thing.
         self.reset();
 
-        if let Some(hp) = self.0 {
+        if let Some(hp) = self.hazard {
             // inactive it, then other thread can reuse this thing.
             hp.active.store(false, Ordering::SeqCst);
         }

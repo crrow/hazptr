@@ -109,4 +109,22 @@ mod tests {
         assert_eq!(shared_domain.eager_reclaim(false), 0);
         assert_eq!(drops_2.load(Ordering::SeqCst), 0);
     }
+
+    #[test]
+    #[should_panic]
+    fn feel_bad() {
+        let dw = HazPtrDomain::new();
+        let dr = HazPtrDomain::new();
+
+        let drops_42 = Arc::new(AtomicUsize::new(0));
+        let x = AtomicPtr::new(Box::into_raw(Box::new(HazPtrObjectWrapper::with_domain(
+            &dw,
+            (42, drops_42.clone()),
+        ))));
+
+        // as a reader
+        // reader use a different domain than the writer.
+        let mut h = HazPtrHolder::for_domain(&dr);
+        let my_x = unsafe { h.load(&x) }.expect("should panic");
+    }
 }

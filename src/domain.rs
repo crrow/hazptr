@@ -50,7 +50,7 @@ impl HazPtrDomain {
     // find a node which is inactive. If we reach the end of
     // the linkedlist, which means there are no reuseable hazptr,
     // so we have to allocate one.
-    pub(crate) fn acquire(&self) -> &'static HazPtr {
+    pub(crate) fn acquire(&self) -> &'_ HazPtr {
         // get the head of the linkedlist.
         let head_ptr = &self.hazptrs.head;
         // unsafe derefer it.
@@ -259,6 +259,28 @@ impl HazPtrDomain {
 
     pub fn eager_reclaim(&self, block: bool) -> usize {
         self.bulk_reclaim(0, block)
+    }
+}
+
+impl Drop for HazPtrDomain {
+    fn drop(&mut self) {
+        // There should be no hazard pointers active.
+        let nretired = *self.retired.count.get_mut();
+        let nreclaimed = self.bulk_reclaim(0, false);
+        debug_assert_eq!(nretired, nreclaimed, "no one should hold ptr any more");
+        assert!(
+            self.retired.head.get_mut().is_null(),
+            "nothing should on the retired list any more"
+        );
+        // also drop all hazptrs, as no-one should be holding them any more.
+        let mut cur_node = *self.hazptrs.head.get_mut();
+        while !cur_node.is_null() {
+            // we are in drop, get the exclusive reference.
+            let mut n = unsafe { Box::from_raw(cur_node) };
+            assert!(!*n.active.get_mut()); // if we are exclusive borrowing, just use get_mut.
+            cur_node = *n.next.get_mut();
+            drop(n);
+        }
     }
 }
 
