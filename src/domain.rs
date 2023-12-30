@@ -15,8 +15,17 @@ use crate::{Deleter, HazPtr, Reclaim};
 //
 // TODO: fix the domain.
 
+// make the struct backwards compatible
+#[non_exhaustive]
 pub(crate) struct Global; // so no one can create a Global Domain by someone else.
 static SHARED_DOMAIN: HazPtrDomain<Global> = HazPtrDomain::new();
+
+#[macro_export]
+macro_rules! domain {
+    () => {
+        HazPtrDomain::<()>::new()
+    };
+}
 
 // Holds linked list of HazPtrs.
 //

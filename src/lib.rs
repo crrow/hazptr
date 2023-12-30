@@ -129,4 +129,9 @@ mod tests {
         let mut h = HazPtrHolder::for_domain(&dr);
         let my_x = unsafe { h.load(&x) }.expect("should panic");
     }
+
+    #[test]
+    fn domain_macro() {
+        let _ = domain!();
+    }
 }
