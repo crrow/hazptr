@@ -1,12 +1,14 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::domain::{Global, HazPtrDomain};
-use crate::{HazPtr, HazPtrObject};
+use crate::{
+    domain::{Global, HazPtrDomain},
+    HazPtr, HazPtrObject,
+};
 
 /// HazPtrHolder is used for readers.
 ///
-/// Since we never deallocate the HazPtr, so it will be fine with static lifetime.
-/// And every access is shared access.
+/// Since we never deallocate the HazPtr, so it will be fine with static
+/// lifetime. And every access is shared access.
 ///
 /// HazPtrHolder should know where the HazPtrDomain come from.
 pub struct HazPtrHolder<'domain, F> {
@@ -35,20 +37,22 @@ impl<'domain, F> HazPtrHolder<'domain, F> {
             ptr
         } else {
             // if we don't have ptr yet then we acquire one from the global domain.
-            let ptr = self.domain.acquire();
+            let ptr = self.domain.acquire_new();
             self.hazard = Some(ptr);
             ptr
         }
     }
     /// #Safety:
     ///    
-    /// Caller must guarantee that the address in AtomicPtr is valid as a reference or null.
-    ///     If it was null, then the address will be turned into an option through the [`std::ptr::NonNull::new`].
-    /// Caller must also guarantee that the value behinde the AtomicPtr will only be deallocated
-    /// through calls to [`HazPtrObject::retire`] on the same [`HazPtrDomain`] as this holder has..
+    /// Caller must guarantee that the address in AtomicPtr is valid as a
+    /// reference or null.     If it was null, then the address will be
+    /// turned into an option through the [`std::ptr::NonNull::new`]. Caller
+    /// must also guarantee that the value behinde the AtomicPtr will only be
+    /// deallocated through calls to [`HazPtrObject::retire`] on the same
+    /// [`HazPtrDomain`] as this holder has..
     ///
-    /// The return type of &T is fine, since the lifetime is the [`HazPtrHolder`] it self, and the [`HazPtrObject`]
-    /// will respect us.
+    /// The return type of &T is fine, since the lifetime is the
+    /// [`HazPtrHolder`] it self, and the [`HazPtrObject`] will respect us.
     pub unsafe fn load<T>(&mut self, ptr: &'_ AtomicPtr<T>) -> Option<&'domain T>
     where
         T: HazPtrObject<'domain, F>, // the HazPtrObj's lifetime as long as domain's

@@ -1,15 +1,15 @@
 //! Anything that guared by a HazPtr, needs to be dropped in a special way.
 //! Basicly they need a sort of back reference to the domain, so we can know
 //! when we gona drop the thing behind the atomic pointer, we need to point back
-//! to the domain, so we gona know where to do the dropping, cause we need to retire
-//! it and reclaim it, so we don't have to drop it in place.
+//! to the domain, so we gona know where to do the dropping, cause we need to
+//! retire it and reclaim it, so we don't have to drop it in place.
 //!
-//! This is why we have the [`HazPtrObject`] which has the method [`HazPtrObject::retire`] ,
-//! which is called when we want to remove something from the data structure.
-//! And we also want people can implement the [`HazPtrObject`] themselves, so they
-//! don't necessarily need the [`HazPtrObjectWrapper`].
-//! But we still provide the type [`HazPtrObjectWrapper`] for who want it.
-//!
+//! This is why we have the [`HazPtrObject`] which has the method
+//! [`HazPtrObject::retire`] , which is called when we want to remove something
+//! from the data structure. And we also want people can implement the
+//! [`HazPtrObject`] themselves, so they don't necessarily need the
+//! [`HazPtrObjectWrapper`]. But we still provide the type
+//! [`HazPtrObjectWrapper`] for who want it.
 use std::ops::{Deref, DerefMut};
 
 use crate::{domain::Global, Deleter, HazPtrDomain, Reclaim};

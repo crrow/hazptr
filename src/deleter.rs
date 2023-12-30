@@ -15,7 +15,8 @@ pub mod deleters {
     use super::Reclaim;
 
     unsafe fn _drop_box(ptr: *mut dyn Reclaim) {
-        // Safety: Safe by the safety gurantees of retire and because its only used when retiring box objects.
+        // Safety: Safe by the safety gurantees of retire and because its only used when
+        // retiring box objects.
         let _ = unsafe { Box::from_raw(ptr) };
     }
     /// # Safety
