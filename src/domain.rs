@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    marker::PhantomData,
     sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
 };
 
@@ -13,20 +14,27 @@ use crate::{Deleter, HazPtr, Reclaim};
 //
 //
 // TODO: fix the domain.
-static SHARED_DOMAIN: HazPtrDomain = HazPtrDomain::new();
+
+pub(crate) struct Global; // so no one can create a Global Domain by someone else.
+static SHARED_DOMAIN: HazPtrDomain<Global> = HazPtrDomain::new();
 
 // Holds linked list of HazPtrs.
 //
 // One for allocating, one for retiring.
-pub struct HazPtrDomain {
+pub struct HazPtrDomain<F> {
     hazptrs: HazPtrs,
     retired: RetiredList,
+    // used for distincting different domain.
+    family: PhantomData<F>,
 }
 
-impl HazPtrDomain {
+impl HazPtrDomain<Global> {
     pub fn shared() -> &'static Self {
         &SHARED_DOMAIN
     }
+}
+
+impl<F> HazPtrDomain<F> {
     // But we also want user be albe to create their own domains.
     //
     // Most users don't need to specify custom domains and custom
@@ -42,6 +50,7 @@ impl HazPtrDomain {
         Self {
             hazptrs: HazPtrs::new(),
             retired: RetiredList::new(),
+            family: PhantomData,
         }
     }
     // try to acquire a hazard pointer from the domain.
@@ -262,7 +271,7 @@ impl HazPtrDomain {
     }
 }
 
-impl Drop for HazPtrDomain {
+impl<F> Drop for HazPtrDomain<F> {
     fn drop(&mut self) {
         // There should be no hazard pointers active.
         let nretired = *self.retired.count.get_mut();

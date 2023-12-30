@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::domain::HazPtrDomain;
+use crate::domain::{Global, HazPtrDomain};
 use crate::{HazPtr, HazPtrObject};
 
 /// HazPtrHolder is used for readers.
@@ -9,12 +9,12 @@ use crate::{HazPtr, HazPtrObject};
 /// And every access is shared access.
 ///
 /// HazPtrHolder should know where the HazPtrDomain come from.
-pub struct HazPtrHolder<'domain> {
+pub struct HazPtrHolder<'domain, F> {
     hazard: Option<&'domain HazPtr>,
-    domain: &'domain HazPtrDomain,
+    domain: &'domain HazPtrDomain<F>,
 }
 
-impl Default for HazPtrHolder<'static> {
+impl Default for HazPtrHolder<'static, Global> {
     fn default() -> Self {
         Self {
             hazard: None,
@@ -23,8 +23,8 @@ impl Default for HazPtrHolder<'static> {
     }
 }
 
-impl<'domain> HazPtrHolder<'domain> {
-    pub fn for_domain(d: &'domain HazPtrDomain) -> Self {
+impl<'domain, F> HazPtrHolder<'domain, F> {
+    pub fn for_domain(d: &'domain HazPtrDomain<F>) -> Self {
         Self {
             hazard: None,
             domain: d,
@@ -51,7 +51,7 @@ impl<'domain> HazPtrHolder<'domain> {
     /// will respect us.
     pub unsafe fn load<T>(&mut self, ptr: &'_ AtomicPtr<T>) -> Option<&'domain T>
     where
-        T: HazPtrObject<'domain>, // the HazPtrObj's lifetime as long as domain's
+        T: HazPtrObject<'domain, F>, // the HazPtrObj's lifetime as long as domain's
     {
         let hazptr = self.hazptr();
         let mut ptr1 = ptr.load(Ordering::SeqCst);
@@ -69,8 +69,8 @@ impl<'domain> HazPtrHolder<'domain> {
 
                     let r = unsafe { nn.as_ref() };
                     debug_assert_eq!(
-                        r.domain() as *const HazPtrDomain,
-                        self.domain as *const HazPtrDomain,
+                        r.domain() as *const HazPtrDomain<F>,
+                        self.domain as *const HazPtrDomain<F>,
                         "object guareded by different domain than holder used to access"
                     );
                     r
@@ -89,7 +89,7 @@ impl<'domain> HazPtrHolder<'domain> {
     }
 }
 
-impl Drop for HazPtrHolder<'_> {
+impl<F> Drop for HazPtrHolder<'_, F> {
     fn drop(&mut self) {
         // make sure if is currently guarding something, then stop guarding that thing.
         self.reset();

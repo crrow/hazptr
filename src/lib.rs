@@ -113,8 +113,10 @@ mod tests {
     #[test]
     #[should_panic]
     fn feel_bad() {
-        let dw = HazPtrDomain::new();
-        let dr = HazPtrDomain::new();
+        let dw = HazPtrDomain::<()>::new();
+        let dr = HazPtrDomain::<()>::new();
+        let _ = HazPtrDomain::shared();
+        // FIX it, these are different domain instances.
 
         let drops_42 = Arc::new(AtomicUsize::new(0));
         let x = AtomicPtr::new(Box::into_raw(Box::new(HazPtrObjectWrapper::with_domain(
