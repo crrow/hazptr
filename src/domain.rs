@@ -8,8 +8,8 @@ use crate::{asymmetric_heavy_barrier, asymmetric_light_barrier, HeavyBarrierKind
 use crate::{Deleter, HazPtr, Reclaim};
 
 const SYNC_TIME_PERIOD: u64 = std::time::Duration::from_nanos(2_000_000_000).as_nanos() as u64;
-const RCOUNT_THRESHOLD: isize = 1000;
-const HCOUNT_MULTIPLER: isize = 2;
+const RETIRED_COUNT_THRESHOLD: isize = 1000;
+const HAZPTR_COUNT_MULTIPLER: isize = 2;
 
 // At present, the domain is static which managed by us,
 // so we can derefer the raw pointer freely;
@@ -72,7 +72,7 @@ impl<F> HazPtrDomain<F> {
         }
     }
 
-    fn acquire(&self) -> &HazPtr {
+    pub(crate) fn acquire(&self) -> &HazPtr {
         if let Some(hazptr) = self.try_acquire_existing() {
             return hazptr;
         }
@@ -103,7 +103,7 @@ impl<F> HazPtrDomain<F> {
     // find a node which is inactive. If we reach the end of
     // the linkedlist, which means there are no reuseable hazptr,
     // so we have to allocate one.
-    pub(crate) fn acquire_new(&self) -> &'_ HazPtr {
+    fn acquire_new(&self) -> &'_ HazPtr {
         // no free hazptrs, allocate one
         let new_hazptr = Box::into_raw(Box::new(HazPtr {
             ptr: AtomicPtr::new(std::ptr::null_mut()),
@@ -263,7 +263,7 @@ impl<F> HazPtrDomain<F> {
     }
 
     const fn reached_threshold(rc: isize, hc: isize) -> bool {
-        rc >= RCOUNT_THRESHOLD && rc >= HCOUNT_MULTIPLER * hc
+        rc >= RETIRED_COUNT_THRESHOLD && rc >= HAZPTR_COUNT_MULTIPLER * hc
     }
 
     fn try_bulk_reclaim(&self) {
@@ -423,6 +423,10 @@ impl<F> HazPtrDomain<F> {
 
     pub fn eager_reclaim(&self, block: bool) -> usize {
         self.bulk_reclaim(true)
+    }
+
+    pub(crate) fn release(&self, hazard: &HazPtr) {
+        hazard.release()
     }
 }
 

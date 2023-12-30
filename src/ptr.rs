@@ -11,9 +11,16 @@ pub struct HazPtr {
 }
 
 impl HazPtr {
+    pub(crate) fn reset(&self) {
+        self.ptr.store(std::ptr::null_mut(), Ordering::Release);
+    }
     pub(crate) fn protect(&self, ptr: *mut u8) {
         // It should receive a shared reference, we should make sure it still valid.
-        self.ptr.store(ptr, Ordering::SeqCst);
+        self.ptr.store(ptr, Ordering::Release);
+    }
+    pub(crate) fn release(&self) {
+        // It should receive a shared reference, we should make sure it still valid.
+        self.active.store(false, Ordering::Release);
     }
     pub(crate) fn try_acquire(&self) -> bool {
         let active = self.active.load(Ordering::Acquire);

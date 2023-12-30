@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::{
+    asymmetric_light_barrier,
     domain::{Global, HazPtrDomain},
     HazPtr, HazPtrObject,
 };
@@ -12,14 +13,14 @@ use crate::{
 ///
 /// HazPtrHolder should know where the HazPtrDomain come from.
 pub struct HazPtrHolder<'domain, F> {
-    hazard: Option<&'domain HazPtr>,
+    hazard: &'domain HazPtr,
     domain: &'domain HazPtrDomain<F>,
 }
 
 impl Default for HazPtrHolder<'static, Global> {
     fn default() -> Self {
         Self {
-            hazard: None,
+            hazard: HazPtrDomain::shared().acquire(),
             domain: HazPtrDomain::shared(),
         }
     }
@@ -28,20 +29,24 @@ impl Default for HazPtrHolder<'static, Global> {
 impl<'domain, F> HazPtrHolder<'domain, F> {
     pub fn for_domain(d: &'domain HazPtrDomain<F>) -> Self {
         Self {
-            hazard: None,
+            hazard: d.acquire(),
             domain: d,
         }
     }
-    fn hazptr(&mut self) -> &'domain HazPtr {
-        if let Some(ptr) = self.hazard {
-            ptr
-        } else {
-            // if we don't have ptr yet then we acquire one from the global domain.
-            let ptr = self.domain.acquire_new();
-            self.hazard = Some(ptr);
-            ptr
+
+    pub fn protect<T>(&mut self, src: &'_ AtomicPtr<T>) -> Option<&'domain T>
+    where
+        T: HazPtrObject<'domain, F>, // the HazPtrObj's lifetime as long as domain's
+    {
+        let mut ptr = src.load(Ordering::Relaxed);
+        loop {
+            match unsafe { self.try_protect(ptr, src) } {
+                Ok(r) => break r,
+                Err(ptr2) => ptr = ptr2,
+            }
         }
     }
+
     /// #Safety:
     ///    
     /// Caller must guarantee that the address in AtomicPtr is valid as a
@@ -53,43 +58,45 @@ impl<'domain, F> HazPtrHolder<'domain, F> {
     ///
     /// The return type of &T is fine, since the lifetime is the
     /// [`HazPtrHolder`] it self, and the [`HazPtrObject`] will respect us.
-    pub unsafe fn load<T>(&mut self, ptr: &'_ AtomicPtr<T>) -> Option<&'domain T>
+    pub unsafe fn try_protect<T>(
+        &mut self,
+        ptr: *mut T, // i have already read the variable once; so we don't have to read it again.
+        src: &'_ AtomicPtr<T>,
+    ) -> Result<Option<&'domain T>, *mut T>
     where
         T: HazPtrObject<'domain, F>, // the HazPtrObj's lifetime as long as domain's
     {
-        let hazptr = self.hazptr();
-        let mut ptr1 = ptr.load(Ordering::SeqCst);
-        loop {
-            // we are trying to protect the pointer of type of T,
-            // but the protect method should protect every thing, so we just cast here.
-            hazptr.protect(ptr1 as *mut u8);
-            let ptr2 = ptr.load(Ordering::SeqCst);
-            if ptr2 == ptr1 {
-                // all good, protected
-                break std::ptr::NonNull::new(ptr1).map(|nn| {
-                    // safety: this is safe:
-                    // 1. target of ptr1 will not be deallocated since our hazard pointer is active.
-                    // 2. point address is valid by the safty contract of load.
+        self.hazard.protect(ptr as *mut u8);
 
-                    let r = unsafe { nn.as_ref() };
-                    debug_assert_eq!(
-                        r.domain() as *const HazPtrDomain<F>,
-                        self.domain as *const HazPtrDomain<F>,
-                        "object guareded by different domain than holder used to access"
-                    );
-                    r
-                });
-            } else {
-                ptr1 = ptr2;
-            }
+        asymmetric_light_barrier();
+
+        // we are trying to protect the pointer of type of T,
+        // but the protect method should protect every thing, so we just cast here.
+        let ptr2 = src.load(Ordering::Acquire);
+        if ptr != ptr2 {
+            self.hazard.reset();
+            return Err(ptr2);
         }
+
+        // all good, protected
+        return Ok(std::ptr::NonNull::new(ptr).map(|nn| {
+            // safety: this is safe:
+            // 1. target of ptr1 will not be deallocated since our hazard pointer is active.
+            // 2. point address is valid by the safty contract of load.
+
+            let r = unsafe { nn.as_ref() };
+            debug_assert_eq!(
+                r.domain() as *const HazPtrDomain<F>,
+                self.domain as *const HazPtrDomain<F>,
+                "object guareded by different domain than holder used to access"
+            );
+            r
+        }));
     }
     pub fn reset(&mut self) {
         // we can do this here since the reset require a mutable reference,
         // if there exists loaded value T, then we cannot call this method.
-        if let Some(hp) = self.hazard {
-            hp.ptr.store(std::ptr::null_mut(), Ordering::SeqCst);
-        }
+        self.hazard.reset();
     }
 }
 
@@ -97,10 +104,6 @@ impl<F> Drop for HazPtrHolder<'_, F> {
     fn drop(&mut self) {
         // make sure if is currently guarding something, then stop guarding that thing.
         self.reset();
-
-        if let Some(hp) = self.hazard {
-            // inactive it, then other thread can reuse this thing.
-            hp.active.store(false, Ordering::SeqCst);
-        }
+        self.domain.release(self.hazard);
     }
 }
